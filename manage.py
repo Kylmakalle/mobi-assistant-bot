@@ -2,8 +2,10 @@
 import os
 import sys
 
+from config import SETTINGS_VAR
+
 if __name__ == "__main__":
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mobi.settings")
+    os.environ.setdefault(SETTINGS_VAR, "settings")
     try:
         from django.core.management import execute_from_command_line
     except ImportError:
@@ -19,4 +21,7 @@ if __name__ == "__main__":
                 "forget to activate a virtual environment?"
             )
         raise
+    import django.conf
+
+    django.conf.ENVIRONMENT_VARIABLE = SETTINGS_VAR
     execute_from_command_line(sys.argv)
