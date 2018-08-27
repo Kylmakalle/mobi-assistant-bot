@@ -536,15 +536,21 @@ def nsfw_command(msg):
             else:
                 file_info = bot.get_file(file_id).wait()
                 if isinstance(file_info, telebot.types.File):
-                    url = telebot.apihelper.FILE_URL.format(bot.token, file_info.file_path)
-                    if file_type == 'sticker':
-                        img = requests.get(url, stream=True).raw.read()
-                        imgdata = Image.open(io.BytesIO(img))
-                        png = io.BytesIO()
-                        imgdata.save(png, format='PNG')
-                        file_bytes = png.getvalue()
-                    else:
-                        file_bytes = requests.get(url).content
+                    try:
+                        url = telebot.apihelper.FILE_URL.format(bot.token, file_info.file_path)
+                        if file_type == 'sticker':
+                            img = requests.get(url, stream=True).raw.read()
+                            imgdata = Image.open(io.BytesIO(img))
+                            png = io.BytesIO()
+                            imgdata.convert('RGB').save(png, format='PNG')
+                            file_bytes = png.getvalue()
+                        else:
+                            file_bytes = requests.get(url).content
+                    except OSError as e:
+                        mobibot_logger.exception('Can\'t save sticker', exc_info=True)
+                        bot.send_message(msg.chat.id, 'Не могу проверить стикер, лучше удоли',
+                                         reply_to_message_id=msg.message_id)
+                        return
                     capp = ClarifaiApp(api_key=CLARIFAI_TOKEN)
                     model = capp.models.get('nsfw-v1.0')
                     is_video = True if ((mime_type and 'mp4' in mime_type) or file_type == 'video') else False
