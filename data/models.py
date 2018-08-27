@@ -33,12 +33,6 @@ class User(models.Model):
         verbose_name='Юзернейм'
     )
 
-    """last_online = models.CharField(
-        max_length=256, blank=True,
-        null=True,
-        default=None
-    )"""
-
     BANNED = -1
     NEW = 0
     OLDFAG = 1
@@ -111,21 +105,13 @@ class User(models.Model):
 
     return_status.short_description = 'Статус'
 
-    """def return_is_subscriber(self):
-        if self.subscriber:
-            return '✅'
-        else:
-            return '❌'
-
-    return_is_subscriber.short_description = 'Подписчик канала'"""
-
 
 class Chat(models.Model):
     class Meta:
         verbose_name_plural = 'Чаты'
         verbose_name = 'Чат'
 
-    id = models.BigIntegerField(primary_key=True, unique=True)  # models.IntegerField(primary_key=True, unique=True)
+    id = models.BigIntegerField(primary_key=True, unique=True)
 
     title = models.CharField(max_length=256, verbose_name='Название')
 
@@ -159,3 +145,24 @@ class Chat(models.Model):
 
     updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class JoinAction(models.Model):
+    user = models.ForeignKey(User)
+    chat = models.ForeignKey(Chat)
+    date = models.IntegerField()
+
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return str(self.user) + ' ' + str(self.chat)
+
+
+class File(models.Model):
+    file_id = models.CharField(max_length=128)
+    type = models.CharField(max_length=128)
+    nsfw = models.FloatField(max_length=128)
+    sfw = models.FloatField(max_length=128)
+    status = models.CharField(max_length=256)
+    mime_type = models.CharField(max_length=128, null=True, blank=True, default=None)

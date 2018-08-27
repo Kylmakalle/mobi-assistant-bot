@@ -1,0 +1,54 @@
+version: '3'
+services:
+  db:
+    image: "postgres:9.6.5"
+    volumes:
+    - "dbdata:/var/lib/postgresql/data"
+    env_file:
+    - .env
+    restart: always
+    ports:
+    - 127.0.0.1:5432:5432
+    networks:
+    - db_nw
+  bot:
+    build: .
+    volumes:
+    - .:/src
+    env_file:
+    - .env
+    command: bash -c "sleep 3; python manage.py makemigrations data && python manage.py migrate data && python bot.py"
+    restart: always
+    networks:
+    - db_nw
+    - web_nw
+    depends_on:
+    - db
+  nginx:
+    image: "nginx"
+    restart: always
+    volumes:
+    - ./nginx:/etc/nginx/conf.d
+    env_file:
+    - .env
+    networks:
+    - web_nw
+    depends_on:
+    - serveo
+  serveo:
+    build: ./docker-serveo
+    tty: true
+    stdin_open: true
+    env_file:
+    - .env
+    command: "ssh -R ${SERVEO_SUB_DOMAIN}:80:nginx:80 -o \"StrictHostKeyChecking no\" serveo.net"
+    networks:
+    - web_nw
+    restart: always
+networks:
+  db_nw:
+    driver: bridge
+  web_nw:
+    driver: bridge
+volumes:
+  dbdata:

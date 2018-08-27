@@ -1,28 +1,36 @@
-import flask
-import telebot
+import io
 import logging
 import re
-import django
-import os
-import requests
+import sys
+from datetime import datetime, timedelta
+from statistics import mean
+
 import bs4
+# Setup database connection
+import django.conf
+import flask
+import requests
+import telebot
+from PIL import Image
 from bs4 import BeautifulSoup
-from random import randint
+from clarifai.rest import ClarifaiApp
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from credentials import host, token, testtoken, local_port, MAINTAINER
+from config import *
+from util import fetch_user_type
 
-os.environ.setdefault("DJANGO_MOBIBOT_SETTINGS_MODULE", "mobi.settings")
-django.setup()
+django.conf.ENVIRONMENT_VARIABLE = SETTINGS_VAR
+os.environ.setdefault(SETTINGS_VAR, "settings")
+from django.core.wsgi import get_wsgi_application
 
-from mobi.settings import DEBUG
-from mobibotweb.models import User, Chat
+application = get_wsgi_application()
+from data.models import *
 
-API_TOKEN = testtoken
+# End setup
 
-WEBHOOK_HOST = host
-WEBHOOK_PORT = local_port
-WEBHOOK_URL_BASE = "https://%s" % (WEBHOOK_HOST)
+API_TOKEN = TOKEN
+WEBHOOK_PORT = 443
+WEBHOOK_URL_BASE = "https://%s.serveo.net" % (SERVEO_SUB_DOMAIN)
 WEBHOOK_URL_PATH = "/%s/" % (API_TOKEN)
 
 app = flask.Flask(__name__)
@@ -30,11 +38,19 @@ bot = telebot.AsyncTeleBot(API_TOKEN)
 
 mobibot_logger = logging.getLogger()
 mobibot_logger.setLevel(logging.INFO)
-handler = logging.FileHandler('mobibot.log', 'a', 'utf-8')
-handler.setFormatter(logging.Formatter('%(levelname)-8s [%(asctime)s] %(message)s'))
-mobibot_logger.addHandler(handler)
 
 ASSISTANT = bot.get_me().wait()
+
+legit_usernames = ['twochannel', 'dvachannel', 'ru2chhw', 'ru2chmobi', 'anime2ch', 'ru2chvg', 'politach', 'ru2chmu',
+                   'ru2chme',
+                   'ru2chmov',
+                   'ru2chsex',
+                   'ru2chfg', 'ru2chga', 'ru2chby', 'ru2chdiy', 'velach', 'stolovach', 'motokonfa', 'ru2chfiz',
+                   'ru2chfa',
+                   'ru2chkz', 'ru2chukr', 'ru2chmg', 'ru2chmobiwp', 'animach', 'random2ch', 'hw_global']
+legit_links = [
+    'shikimori.org', 'myanimelist.net'
+]
 
 
 # Empty webserver index, return nothing, just http 200
@@ -44,7 +60,7 @@ def index():
 
 
 # Process webhook calls
-@app.route('/', methods=['POST'])
+@app.route('/%s/' % (TOKEN), methods=['POST'])
 def webhook():
     if flask.request.headers.get('content-type') == 'application/json':
         json_string = flask.request.get_data().decode('utf-8')
@@ -55,32 +71,20 @@ def webhook():
         flask.abort(403)
 
 
-def random_equation():
-    num_a = randint(-15, 15)
-    num_b = randint(-10, 10)
-    answer = num_a + num_b
-    fake_answer = randint(-25, 25)
-    while fake_answer == answer:
-        fake_answer = randint(-25, 25)
-    return {'a': num_a, 'b': num_b, 'answer': answer, 'fake_answer': fake_answer}
-
-
-def get_welcome_message(chat, user, chat_db=None):
-    if chat_db and chat_db.welcome_message:
-        return {'message': chat_db.welcome_message.format(USER_ID=user.id, FIRST_NAME=user.first_name, TITLE=chat.title,
-                                                          VAR_A=chat_db.welcome_var_a,
-                                                          VAR_B=chat_db.welcome_var_b),
-                'VAR_A': chat_db.welcome_var_a,
-                'VAR_B': chat_db.welcome_var_b}
-    else:
-        equation = random_equation()
-        sample_welcome_message = 'Привет, <a href="tg://user?id={}">{}</a>! Добро пожаловать в <b>{}</b>.\n' \
-                                 'Сколько будет {} + {}\n' \
-                                 '<b>{VAR_A}</b> или <b>{VAR_B}</b>?'.format(user.id, user.first_name, chat.title,
-                                                                             equation['a'], equation['b'],
-                                                                             VAR_A=equation['answer'],
-                                                                             VAR_B=equation['fake_answer'])
-        return {'message': sample_welcome_message, 'VAR_A': equation['answer'], 'VAR_B': equation['fake_answer']}
+def dump_telegram_object(msg):
+    ret = {}
+    for key, val in msg.__dict__.items():
+        if isinstance(val, (int, str, dict)):
+            pass
+        elif val is None:
+            pass
+        elif isinstance(val, (tuple, list)):
+            val = [dump_telegram_object(x) for x in val]
+        else:
+            val = dump_telegram_object(val)
+        if val is not None:
+            ret[key] = val
+    return ret
 
 
 def create_user(usr):
@@ -112,12 +116,32 @@ def is_legit(chat_id):
     return Chat.objects.filter(id=chat_id).first()
 
 
+def create_join_action(user, chat, date):
+    return JoinAction.objects.update_or_create(
+        user=user,
+        chat=chat,
+        date=date if isinstance(date, int) else date.timestamp()
+    )[0]
+
+
+def get_join_action(user, chat, date):
+    joined = JoinAction.objects.filter(user=user, chat=chat)
+    if joined:
+        return joined[0]
+    else:
+        return create_join_action(user, chat, date)
+
+
 def get_chat(chat_obj):
     chat_db = Chat.objects.filter(id=chat_obj.id)
     if chat_db:
         return chat_db[0]
     else:
         return create_chat(chat_obj)
+
+
+def is_user_in_db(uid):
+    return User.objects.filter(id=uid).first()
 
 
 def get_user(usr):
@@ -211,7 +235,7 @@ def convert_markdown(text):
                 elif soup.contents[-1].name != 'a':
                     soup.contents[-1].string = (soup.contents[-1].text[
                                                 :(max_length - (
-                                                    len(str(soup)) - links_length - len(soup.contents[-1].text)))])
+                                                        len(str(soup)) - links_length - len(soup.contents[-1].text)))])
                 else:
                     break
             else:
@@ -334,12 +358,270 @@ def dvach_reveal(message):
                                          disable_web_page_preview=disable_preview).wait()
 
 
+def process_user_type(username):
+    logging.debug('Querying %s type from db' % username)
+    user = User.objects.filter(username=username).first()
+    if user:
+        # logging.debug('Record found, type is: %s' % user['type'])
+        return 'user'
+    else:
+        logging.debug('Doing network request for type of %s' % username)
+        user_type = fetch_user_type(username)
+        # logging.debug('Result is: %s' % user_type)
+        return user_type
+
+
+def parse_entity(text, entity):
+    if sys.maxunicode == 0xffff:
+        return text[entity.offset:entity.offset + entity.length]
+    else:
+        entity_text = text.encode('utf-16-le')
+        entity_text = entity_text[entity.offset * 2:(entity.offset + entity.length) * 2]
+
+    return entity_text.decode('utf-16-le')
+
+
+def check_spam(msg):
+    if GUARD_MODE:
+        to_hide = False
+        chat = get_chat(msg.chat)
+        user = get_user(msg.from_user)
+        if user.status == User.NEW or user.status == User.BANNED:
+            while not to_hide:
+                now = datetime.utcnow()
+                join_date = get_join_action(user, chat, now)
+                if not join_date:
+                    return
+                if now - timedelta(hours=24) > datetime.fromtimestamp(join_date.date):
+                    user.status = User.OLDFAG
+                    user.save()
+                    return
+
+                for ent in (msg.entities or []):
+                    if ent.type in ('url', 'text_link'):
+                        if ent.type == 'url':
+                            url = parse_entity(msg.text, ent)
+                        elif ent.type == 'text_link':
+                            url = ent.url
+                        if not next((link for link in legit_links if link in url), None):
+                            to_hide = True
+                            reason = 'external link'
+                            break
+                        else:
+                            user.status = user.OLDFAG
+                            user.save()
+                            return
+                    if ent.type in ('email',):
+                        to_hide = True
+                        reason = 'email'
+                        break
+                    if ent.type == 'mention':
+                        username = parse_entity(msg.text, ent).lstrip('@')
+                        user_type = process_user_type(username)
+                        if user_type in ('group', 'channel'):
+                            if username not in legit_usernames:
+                                to_hide = True
+                                reason = '@-link to {}'.format(user_type)
+                                break
+                            else:
+                                user.status = user.OLDFAG
+                                user.save()
+                                return
+
+                for cap_ent in (msg.caption_entities or []):
+                    if cap_ent.type in ('url', 'text_link'):
+                        if cap_ent.type == 'url':
+                            url = parse_entity(msg.caption, cap_ent)
+                        elif cap_ent.type == 'text_link':
+                            url = cap_ent.url
+                        if not next((link for link in legit_links if link in url), None):
+                            to_hide = True
+                            reason = 'caption external link'
+                            break
+                        else:
+                            user.status = user.OLDFAG
+                            user.save()
+                            return
+                    if cap_ent.type in ('email',):
+                        to_hide = True
+                        reason = 'caption email'
+                        break
+                    if cap_ent.type == 'mention':
+                        username = parse_entity(msg.caption, cap_ent).lstrip('@')
+                        user_type = process_user_type(username)
+                        if user_type in ('group', 'channel'):
+                            if username not in legit_usernames:
+                                to_hide = True
+                                reason = 'caption @-link to {}'.format(user_type)
+                                break
+                            else:
+                                user.status = user.OLDFAG
+                                user.save()
+                                return
+
+                if msg.forward_from:
+                    reason = 'forwarded'
+                    to_hide = True
+                if msg.forward_from_chat:
+                    if getattr(msg.forward_from_chat, 'username', None) not in legit_usernames:
+                        reason = 'forwarded'
+                        to_hide = True
+                    else:
+                        user.status = user.OLDFAG
+                        user.save()
+                        return
+                break
+            if to_hide:
+                delete_text = 'Removed message from <a href="tg://user?id={USER_ID}">{FIRST_NAME}</a>\nReason: {REASON}'.format(
+                    USER_ID=msg.from_user.id, FIRST_NAME=msg.from_user.first_name, REASON=reason)
+                fwd_in_pm = bot.forward_message(MAINTAINER, msg.chat.id, msg.message_id).wait()
+
+                logged_msg = bot.send_message(MAINTAINER, delete_text, reply_to_message_id=fwd_in_pm.message_id,
+                                              parse_mode='HTML').wait()
+                bot.delete_message(msg.chat.id, msg.message_id).wait()
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton('Ban {}'.format(msg.from_user.first_name),
+                                                callback_data='ban-{}'.format(msg.from_user.id)),
+                           InlineKeyboardButton('Ignore {}'.format(msg.from_user.first_name),
+                                                callback_data='unwatch-{}'.format(msg.from_user.id)))
+                del_msg = bot.send_message(msg.chat.id, delete_text, parse_mode='HTML', reply_markup=markup).wait()
+                markup = InlineKeyboardMarkup()
+                markup.add(
+                    InlineKeyboardButton(msg.chat.title,
+                                         'https://t.me/{}/{}'.format(msg.chat.username, del_msg.message_id)))
+                bot.edit_message_reply_markup(logged_msg.chat.id, logged_msg.message_id, reply_markup=markup).wait()
+                return to_hide
+
+
+def get_file(file_id):
+    return File.objects.filter(file_id=file_id).first()
+
+
+@bot.message_handler(commands=['nsfw', 'sfw'])
+def nsfw_command(msg):
+    if msg.chat.type == 'supergroup':
+        if msg.reply_to_message:
+            mime_type = None
+            if msg.reply_to_message.photo:
+                file_id = msg.reply_to_message.photo[-1].file_id
+                file_type = 'photo'
+
+            elif msg.reply_to_message.document:
+                if msg.reply_to_message.document.thumb:
+                    file_id = msg.reply_to_message.document.file_id
+                    file_type = 'document'
+                    mime_type = msg.reply_to_message.document.mime_type
+                else:
+                    bot.send_message(msg.chat.id, 'Данный тип файла не поддерживается',
+                                     reply_to_message_id=msg.reply_to_message.message_id).wait()
+                    return
+            elif msg.reply_to_message.sticker:
+                file_id = msg.reply_to_message.sticker.file_id
+                file_type = 'sticker'
+            elif msg.reply_to_message.video:
+                bot.send_message(msg.chat.id, 'Данный тип файла не поддерживается',
+                                 reply_to_message_id=msg.reply_to_message.message_id).wait()
+                return
+            else:
+                bot.send_message(msg.chat.id, 'Данный тип файла не поддерживается',
+                                 reply_to_message_id=msg.reply_to_message.message_id).wait()
+                return
+            bot.send_chat_action(msg.chat.id, 'typing').wait()
+            file = get_file(file_id)
+            if file:
+                bot.send_message(msg.chat.id, 'Я на <code>{:.1%}</code> уверен, что это <b>{}</b>'.format(
+                    getattr(file, file.status.lower()), file.status),
+                                 reply_to_message_id=msg.reply_to_message.message_id,
+                                 parse_mode='HTML').wait()
+            else:
+                file_info = bot.get_file(file_id).wait()
+                if isinstance(file_info, telebot.types.File):
+                    url = telebot.apihelper.FILE_URL.format(bot.token, file_info.file_path)
+                    if file_type == 'sticker':
+                        img = requests.get(url, stream=True).raw.read()
+                        imgdata = Image.open(io.BytesIO(img))
+                        png = io.BytesIO()
+                        imgdata.save(png, format='PNG')
+                        file_bytes = png.getvalue()
+                    else:
+                        file_bytes = requests.get(url).content
+                    capp = ClarifaiApp(api_key=CLARIFAI_TOKEN)
+                    model = capp.models.get('nsfw-v1.0')
+                    is_video = True if ((mime_type and 'mp4' in mime_type) or file_type == 'video') else False
+                    try:
+                        prediction = model.predict_by_bytes(file_bytes, is_video=is_video)
+                        if prediction['status']['code'] == 10000:
+                            if prediction['outputs'][0]['data'].get('frames'):
+                                sfw_list = []
+                                nsfw_list = []
+                                for frame in prediction['outputs'][0]['data']['frames']:
+                                    for concept in frame['data']['concepts']:
+                                        if concept['name'] == 'sfw':
+                                            sfw_list.append(concept['value'])
+                                        else:
+                                            nsfw_list.append(concept['value'])
+                                sfw = mean(sfw_list)
+                                nsfw = mean(nsfw_list)
+                            else:
+                                for concept in prediction['outputs'][0]['data']['concepts']:
+                                    if concept['name'] == 'sfw':
+                                        sfw = concept['value']
+                                    else:
+                                        nsfw = concept['value']
+                            status = 'NSFW' if nsfw >= sfw else 'SFW'
+                            percentage = nsfw if nsfw >= sfw else sfw
+                            bot.send_message(msg.chat.id,
+                                             'Я на <code>{:.1%}</code> уверен, что это <b>{}</b>'.format(percentage,
+                                                                                                         status),
+                                             parse_mode='HTML', reply_to_message_id=msg.reply_to_message.message_id)
+                            File.objects.create(
+                                file_id=file_id,
+                                type=file_type,
+                                mime_type=mime_type,
+                                nsfw=nsfw,
+                                sfw=sfw,
+                                status=status
+                            )
+                        else:
+                            bot.send_message(MAINTAINER, 'Error!\n\n' + '<pre>' + prediction + '</pre>',
+                                             parse_mode='HTML').wait()
+                            bot.send_message(msg.chat.id, 'Неизвестная ошибка',
+                                             reply_to_message_id=msg.message_id).wait()
+                    except Exception as e:
+                        print(e)
+                        bot.send_message(MAINTAINER, 'Error!\n\n' + '<pre>' + str(e) + '</pre>',
+                                         parse_mode='HTML').wait()
+                        bot.send_message(msg.chat.id, 'Неизвестная ошибка',
+                                         reply_to_message_id=msg.message_id).wait()
+                else:
+                    bot.send_message(msg.chat.id, 'Не могу получить файл, возможно он слишком большой',
+                                     reply_to_message_id=msg.reply_to_message.message_id).wait()
+        else:
+            bot.send_message(msg.chat.id, 'Отправь команду в ответ на медиа', reply_to_message_id=msg.message_id).wait()
+    else:
+        bot.send_message(msg.chat.id, 'Команда работает только в группах', reply_to_message_id=msg.message_id).wait()
+
+
+@bot.edited_message_handler(content_types=['photo', 'video', 'audio', 'sticker', 'document'])
+@bot.message_handler(content_types=['photo', 'video', 'audio', 'sticker', 'document'])
+def process_attachments(msg):
+    update_user_info(msg.from_user)
+    if msg.chat.type == 'private':
+        pass
+    elif msg.chat.type == 'supergroup':
+        if check_spam(msg):
+            return
+
+
+@bot.edited_message_handler(content_types=['text'])
 @bot.message_handler(content_types=['text'])
 def message_handler(msg):
     update_user_info(msg.from_user)
     if msg.chat.type == 'private':
         bot.send_message(msg.chat.id, 'Предложка обоев временно недоступна, отпиши админам в @ru2chmobi').wait()
     elif msg.chat.type == 'supergroup':
+        if check_spam(msg):
+            return
         try:
             dvach_reveal(msg)
         except Exception as e:
@@ -349,88 +631,106 @@ def message_handler(msg):
 
 @bot.message_handler(content_types=['new_chat_members'])
 def new_chat_members_handler(msg):
-    # update_user_info(msg.from_user)
-    print('New member')
     if is_legit(msg.chat.id):
+        chat = get_chat(msg.chat)
         for new_member in msg.new_chat_members:
             if new_member.id != ASSISTANT.id:  # and new_member.is_bot() is False:
                 user = get_user(new_member)
-                if user.status == user.NEW:# or user.status == user.OLDFAG:
-                    markup = InlineKeyboardMarkup(row_width=2)
-                    chat = get_chat(msg.chat)
-                    welcome = get_welcome_message(msg.chat, new_member, chat)
-                    markup.row(InlineKeyboardButton(str(welcome['VAR_A']),
-                                                    callback_data='id={}VAR_A'.format(new_member.id)),
-                               InlineKeyboardButton(str(welcome['VAR_B']),
-                                                    callback_data='id={}VAR_B'.format(new_member.id)))
-
-                    markup.add(InlineKeyboardButton('Проблемы с ответом 😕', url='https://t.me/Kylmakalle'))
-                    sended_welcome = bot.send_message(msg.chat.id, welcome['message'], parse_mode='HTML',
-                                                      reply_markup=markup).wait()
-                    if isinstance(sended_welcome, tuple):
-                        mobibot_logger.error(
-                            'Incorrect welcome message markup! ' + str(sended_welcome) + ' ' + str(msg.chat))
-                    else:
-                        RSTRICT = bot.restrict_chat_member(msg.chat.id, new_member.id, can_send_messages=False,
-                                                 can_send_media_messages=False, can_send_other_messages=False,
-                                                 can_add_web_page_previews=False).wait()
-                        print('RESTRICTED', RSTRICT)
-    elif ASSISTANT in msg.new_chat_members:
+                if user.status == User.NEW:
+                    get_join_action(user, chat, msg.date)
+    elif ASSISTANT.id in [member.id for member in msg.new_chat_members] and get_user(
+            msg.from_user).status < User.ADMIN:
         mobibot_logger.info('Added to chat ' + str(msg.chat) + ' by ' + str(msg.from_user))
-        # bot.send_message(msg.chat.id, 'Contact @Kylmakalle first!').wait()
-        # bot.leave_chat(msg.chat.id).wait()
+        bot.send_message(msg.chat.id, 'Contact @Kylmakalle first!').wait()
+        bot.leave_chat(msg.chat.id).wait()
 
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_buttons(call):
     if call.message and call.data:
-        join_answer = re.search('id=([0-9]*)(VAR_A|VAR_B|OK)', call.data)
-        if join_answer:
-            if join_answer.group(1) == str(call.from_user.id):
-                unrestrict = bot.restrict_chat_member(call.message.chat.id, call.from_user.id, can_send_messages=True,
-                                                      can_send_media_messages=True, can_send_other_messages=True,
-                                                      can_add_web_page_previews=True).wait()
-                print('UNRESTRICTED', unrestrict)
-                if isinstance(unrestrict, tuple):
-                    mobibot_logger.error('Can\'t unrestrict user! ' + str(unrestrict) + ' ' + str(call))
-                    # errorprocess
-                    bot.send_message(MAINTAINER, 'Can\'t unrestrict user! ' + str(unrestrict) + ' ' + str(call)).wait()
+        if 'unwatch-' in call.data:
+            if call.from_user.id in [admin.user.id for admin in
+                                     bot.get_chat_administrators(
+                                         call.message.chat.id).wait()] or call.from_user.id == MAINTAINER:
+                call.data = call.data.split('unwatch-')[1]
+                user = is_user_in_db(int(call.data))
+                if user:
+                    if user.status == User.BANNED or user.status == User.NEW:
+                        user.status = User.OLDFAG
+                        user.save()
+                        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id).wait()
+                        bot.send_message(MAINTAINER,
+                                         '<a href="tg://user?id={ADMIN_ID}">{ADMIN_FIRST_NAME}</a> activated ignore for <a href="tg://user?id={USER_ID}">{FIRST_NAME}</a>'.format(
+                                             ADMIN_ID=call.from_user.id,
+                                             ADMIN_FIRST_NAME=call.from_user.first_name,
+                                             USER_ID=user.id,
+                                             FIRST_NAME=user.first_name
+                                         ), parse_mode='HTML')
+                        bot.answer_callback_query(call.id, 'Done!').wait()
                 else:
-                    user = get_user(call.from_user)
-                    user.status = user.OLDFAG
-                    user.save()
-                    # chat = get_chat(call.message.chat)
-                    ## add user to chat
-                    if join_answer.group(2) == 'OK':
-                        bot.edit_message_text(
-                            'Привет, <a href="tg://user?id={}">{}</a>! Добро пожаловать в <b>{}</b>'.format(
-                                call.from_user.id,
-                                call.from_user.first_name,
-                                call.chat.title),
-                            call.message.chat.id, call.message.message_id, parse_mode='HTML').wait()
-                    else:
-                        welcome_var = \
-                            get_welcome_message(call.message.chat, call.message.from_user, get_chat(call.message.chat))[
-                                join_answer.group(2)]
-
-                        bot.edit_message_text(
-                            '<a href="tg://user?id={}">{}</a> выбирает <b>{}</b>. Поприветствуем!'.format(
-                                call.from_user.id,
-                                call.from_user.first_name,
-                                welcome_var),
-                            call.message.chat.id, call.message.message_id, parse_mode='HTML').wait()
-
-                    bot.answer_callback_query(call.id).wait()
+                    bot.answer_callback_query(call.id, 'Something went wrong').wait()
+            else:
+                bot.answer_callback_query(call.id, 'Молодой человек, это не для Вас написано.', show_alert=True).wait()
+        elif 'ban-' in call.data and not 'unban-' in call.data:
+            if call.from_user.id in [admin.user.id for admin in
+                                     bot.get_chat_administrators(
+                                         call.message.chat.id).wait()] or call.from_user.id == MAINTAINER:
+                call.data = call.data.split('ban-')[1]
+                user = is_user_in_db(int(call.data))
+                if user:
+                    if user.status == User.NEW or user.status == User.OLDFAG:
+                        user.status = User.BANNED
+                        user.save()
+                    markup = InlineKeyboardMarkup()
+                    markup.add(InlineKeyboardButton('Unban {}'.format(user.first_name),
+                                                    callback_data='unban-{}'.format(call.data)))
+                    bot.kick_chat_member(call.message.chat.id, call.data).wait()
+                    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                                  reply_markup=markup).wait()
+                    bot.send_message(MAINTAINER,
+                                     '<a href="tg://user?id={ADMIN_ID}">{ADMIN_FIRST_NAME}</a> banned <a href="tg://user?id={USER_ID}">{FIRST_NAME}</a>'.format(
+                                         ADMIN_ID=call.from_user.id,
+                                         ADMIN_FIRST_NAME=call.from_user.first_name,
+                                         USER_ID=user.id,
+                                         FIRST_NAME=user.first_name
+                                     ), parse_mode='HTML')
+                    bot.answer_callback_query(call.id, 'Done!').wait()
+                else:
+                    bot.answer_callback_query(call.id, 'Something went wrong').wait()
+            else:
+                bot.answer_callback_query(call.id, 'Молодой человек, это не для Вас написано.', show_alert=True).wait()
+        elif 'unban-' in call.data:
+            if call.from_user.id in [admin.user.id for admin in
+                                     bot.get_chat_administrators(
+                                         call.message.chat.id).wait()] or call.from_user.id == MAINTAINER:
+                call.data = call.data.split('unban-')[1]
+                user = is_user_in_db(int(call.data))
+                if user:
+                    if user.status == User.BANNED:
+                        user.status = User.OLDFAG
+                        user.save()
+                        bot.unban_chat_member(call.message.chat.id, call.data).wait()
+                        markup = InlineKeyboardMarkup()
+                        markup.add(InlineKeyboardButton('Ban {}'.format(user.first_name),
+                                                        callback_data='ban-{}'.format(call.data)))
+                        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                                      reply_markup=markup).wait()
+                        bot.send_message(MAINTAINER,
+                                         '<a href="tg://user?id={ADMIN_ID}">{ADMIN_FIRST_NAME}</a> unbanned <a href="tg://user?id={USER_ID}">{FIRST_NAME}</a>'.format(
+                                             ADMIN_ID=call.from_user.id,
+                                             ADMIN_FIRST_NAME=call.from_user.first_name,
+                                             USER_ID=user.id,
+                                             FIRST_NAME=user.first_name
+                                         ), parse_mode='HTML')
+                        bot.answer_callback_query(call.id, 'Done!').wait()
+                else:
+                    bot.answer_callback_query(call.id, 'Something went wrong').wait()
             else:
                 bot.answer_callback_query(call.id, 'Молодой человек, это не для Вас написано.', show_alert=True).wait()
 
 
-bot.remove_webhook()
-if DEBUG:
-    print('DEV STARTED')
-    bot.polling()
-else:
+if __name__ == "__main__":
+    bot.skip_pending = True
+    bot.remove_webhook()
     bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH)
-    print('PROD STARTED!')
-    # Start flask server
-    app.run(host='127.0.0.1', port=WEBHOOK_PORT)
+    app.run(host='0.0.0.0', port=8888)
