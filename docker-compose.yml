@@ -5,7 +5,7 @@ services:
     volumes:
     - "dbdata:/var/lib/postgresql/data"
     env_file:
-    - env_file
+    - .env
     restart: always
     ports:
     - 127.0.0.1:5432:5432
@@ -16,7 +16,7 @@ services:
     volumes:
     - .:/src
     env_file:
-    - env_file
+    - .env
     command: bash -c "sleep 3; python manage.py makemigrations data && python manage.py migrate data && python bot.py"
     restart: always
     networks:
@@ -30,7 +30,7 @@ services:
     volumes:
     - ./nginx:/etc/nginx/conf.d
     env_file:
-    - env_file
+    - .env
     networks:
     - web_nw
     depends_on:
@@ -40,8 +40,8 @@ services:
     tty: true
     stdin_open: true
     env_file:
-    - env_file
-    command: "ssh -R $${SERVEO_SUB_DOMAIN}:80:nginx:80 -o \"StrictHostKeyChecking no\" serveo.net"
+    - .env
+    command: "ssh -R ${SERVEO_SUB_DOMAIN}:80:nginx:80 -o \"StrictHostKeyChecking no\" serveo.net"
     networks:
     - web_nw
     restart: always

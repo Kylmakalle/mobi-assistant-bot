@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from statistics import mean
 
 import bs4
+# Setup database connection
+import django.conf
 import flask
 import requests
 import telebot
@@ -16,9 +18,6 @@ from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import *
 from util import fetch_user_type
-
-# Setup database connection
-import django.conf
 
 django.conf.ENVIRONMENT_VARIABLE = SETTINGS_VAR
 os.environ.setdefault(SETTINGS_VAR, "settings")
@@ -383,114 +382,115 @@ def parse_entity(text, entity):
 
 
 def check_spam(msg):
-    to_hide = False
-    chat = get_chat(msg.chat)
-    user = get_user(msg.from_user)
-    if user.status == User.NEW or user.status == User.BANNED:
-        while not to_hide:
-            now = datetime.utcnow()
-            join_date = get_join_action(user, chat, now)
-            if not join_date:
-                return
-            if now - timedelta(hours=24) > datetime.fromtimestamp(join_date.date):
-                user.status = User.OLDFAG
-                user.save()
-                return
-
-            for ent in (msg.entities or []):
-                if ent.type in ('url', 'text_link'):
-                    if ent.type == 'url':
-                        url = parse_entity(msg.text, ent)
-                    elif ent.type == 'text_link':
-                        url = ent.url
-                    if not next((link for link in legit_links if link in url), None):
-                        to_hide = True
-                        reason = 'external link'
-                        break
-                    else:
-                        user.status = user.OLDFAG
-                        user.save()
-                        return
-                if ent.type in ('email',):
-                    to_hide = True
-                    reason = 'email'
-                    break
-                if ent.type == 'mention':
-                    username = parse_entity(msg.text, ent).lstrip('@')
-                    user_type = process_user_type(username)
-                    if user_type in ('group', 'channel'):
-                        if username not in legit_usernames:
-                            to_hide = True
-                            reason = '@-link to {}'.format(user_type)
-                            break
-                        else:
-                            user.status = user.OLDFAG
-                            user.save()
-                            return
-
-            for cap_ent in (msg.caption_entities or []):
-                if cap_ent.type in ('url', 'text_link'):
-                    if cap_ent.type == 'url':
-                        url = parse_entity(msg.caption, cap_ent)
-                    elif cap_ent.type == 'text_link':
-                        url = cap_ent.url
-                    if not next((link for link in legit_links if link in url), None):
-                        to_hide = True
-                        reason = 'caption external link'
-                        break
-                    else:
-                        user.status = user.OLDFAG
-                        user.save()
-                        return
-                if cap_ent.type in ('email',):
-                    to_hide = True
-                    reason = 'caption email'
-                    break
-                if cap_ent.type == 'mention':
-                    username = parse_entity(msg.caption, cap_ent).lstrip('@')
-                    user_type = process_user_type(username)
-                    if user_type in ('group', 'channel'):
-                        if username not in legit_usernames:
-                            to_hide = True
-                            reason = 'caption @-link to {}'.format(user_type)
-                            break
-                        else:
-                            user.status = user.OLDFAG
-                            user.save()
-                            return
-
-            if msg.forward_from:
-                reason = 'forwarded'
-                to_hide = True
-            if msg.forward_from_chat:
-                if getattr(msg.forward_from_chat, 'username', None) not in legit_usernames:
-                    reason = 'forwarded'
-                    to_hide = True
-                else:
-                    user.status = user.OLDFAG
+    if GUARD_MODE:
+        to_hide = False
+        chat = get_chat(msg.chat)
+        user = get_user(msg.from_user)
+        if user.status == User.NEW or user.status == User.BANNED:
+            while not to_hide:
+                now = datetime.utcnow()
+                join_date = get_join_action(user, chat, now)
+                if not join_date:
+                    return
+                if now - timedelta(hours=24) > datetime.fromtimestamp(join_date.date):
+                    user.status = User.OLDFAG
                     user.save()
                     return
-            break
-        if to_hide:
-            delete_text = 'Removed message from <a href="tg://user?id={USER_ID}">{FIRST_NAME}</a>\nReason: {REASON}'.format(
-                USER_ID=msg.from_user.id, FIRST_NAME=msg.from_user.first_name, REASON=reason)
-            fwd_in_pm = bot.forward_message(MAINTAINER, msg.chat.id, msg.message_id).wait()
 
-            logged_msg = bot.send_message(MAINTAINER, delete_text, reply_to_message_id=fwd_in_pm.message_id,
-                                          parse_mode='HTML').wait()
-            bot.delete_message(msg.chat.id, msg.message_id).wait()
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton('Ban {}'.format(msg.from_user.first_name),
-                                            callback_data='ban-{}'.format(msg.from_user.id)),
-                       InlineKeyboardButton('Ignore {}'.format(msg.from_user.first_name),
-                                            callback_data='unwatch-{}'.format(msg.from_user.id)))
-            del_msg = bot.send_message(msg.chat.id, delete_text, parse_mode='HTML', reply_markup=markup).wait()
-            markup = InlineKeyboardMarkup()
-            markup.add(
-                InlineKeyboardButton(msg.chat.title,
-                                     'https://t.me/{}/{}'.format(msg.chat.username, del_msg.message_id)))
-            bot.edit_message_reply_markup(logged_msg.chat.id, logged_msg.message_id, reply_markup=markup).wait()
-            return to_hide
+                for ent in (msg.entities or []):
+                    if ent.type in ('url', 'text_link'):
+                        if ent.type == 'url':
+                            url = parse_entity(msg.text, ent)
+                        elif ent.type == 'text_link':
+                            url = ent.url
+                        if not next((link for link in legit_links if link in url), None):
+                            to_hide = True
+                            reason = 'external link'
+                            break
+                        else:
+                            user.status = user.OLDFAG
+                            user.save()
+                            return
+                    if ent.type in ('email',):
+                        to_hide = True
+                        reason = 'email'
+                        break
+                    if ent.type == 'mention':
+                        username = parse_entity(msg.text, ent).lstrip('@')
+                        user_type = process_user_type(username)
+                        if user_type in ('group', 'channel'):
+                            if username not in legit_usernames:
+                                to_hide = True
+                                reason = '@-link to {}'.format(user_type)
+                                break
+                            else:
+                                user.status = user.OLDFAG
+                                user.save()
+                                return
+
+                for cap_ent in (msg.caption_entities or []):
+                    if cap_ent.type in ('url', 'text_link'):
+                        if cap_ent.type == 'url':
+                            url = parse_entity(msg.caption, cap_ent)
+                        elif cap_ent.type == 'text_link':
+                            url = cap_ent.url
+                        if not next((link for link in legit_links if link in url), None):
+                            to_hide = True
+                            reason = 'caption external link'
+                            break
+                        else:
+                            user.status = user.OLDFAG
+                            user.save()
+                            return
+                    if cap_ent.type in ('email',):
+                        to_hide = True
+                        reason = 'caption email'
+                        break
+                    if cap_ent.type == 'mention':
+                        username = parse_entity(msg.caption, cap_ent).lstrip('@')
+                        user_type = process_user_type(username)
+                        if user_type in ('group', 'channel'):
+                            if username not in legit_usernames:
+                                to_hide = True
+                                reason = 'caption @-link to {}'.format(user_type)
+                                break
+                            else:
+                                user.status = user.OLDFAG
+                                user.save()
+                                return
+
+                if msg.forward_from:
+                    reason = 'forwarded'
+                    to_hide = True
+                if msg.forward_from_chat:
+                    if getattr(msg.forward_from_chat, 'username', None) not in legit_usernames:
+                        reason = 'forwarded'
+                        to_hide = True
+                    else:
+                        user.status = user.OLDFAG
+                        user.save()
+                        return
+                break
+            if to_hide:
+                delete_text = 'Removed message from <a href="tg://user?id={USER_ID}">{FIRST_NAME}</a>\nReason: {REASON}'.format(
+                    USER_ID=msg.from_user.id, FIRST_NAME=msg.from_user.first_name, REASON=reason)
+                fwd_in_pm = bot.forward_message(MAINTAINER, msg.chat.id, msg.message_id).wait()
+
+                logged_msg = bot.send_message(MAINTAINER, delete_text, reply_to_message_id=fwd_in_pm.message_id,
+                                              parse_mode='HTML').wait()
+                bot.delete_message(msg.chat.id, msg.message_id).wait()
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton('Ban {}'.format(msg.from_user.first_name),
+                                                callback_data='ban-{}'.format(msg.from_user.id)),
+                           InlineKeyboardButton('Ignore {}'.format(msg.from_user.first_name),
+                                                callback_data='unwatch-{}'.format(msg.from_user.id)))
+                del_msg = bot.send_message(msg.chat.id, delete_text, parse_mode='HTML', reply_markup=markup).wait()
+                markup = InlineKeyboardMarkup()
+                markup.add(
+                    InlineKeyboardButton(msg.chat.title,
+                                         'https://t.me/{}/{}'.format(msg.chat.username, del_msg.message_id)))
+                bot.edit_message_reply_markup(logged_msg.chat.id, logged_msg.message_id, reply_markup=markup).wait()
+                return to_hide
 
 
 def get_file(file_id):

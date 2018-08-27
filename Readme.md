@@ -1,6 +1,6 @@
 ```
-# Edit env_file.example
-cp env_file.example env_file
+# Edit example.env
+cp example.env .env
 
 docker-compose up -d --build
 ```
