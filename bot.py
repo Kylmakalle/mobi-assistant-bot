@@ -644,6 +644,8 @@ def new_chat_members_handler(msg):
                 user = get_user(new_member)
                 if user.status == User.NEW:
                     get_join_action(user, chat, msg.date)
+            elif new_member.is_bot:
+                bot.send_message(msg.chat.id, 'Хахах тупой бот, што ты мне сделаешь, я умнее тебя!', reply_to_message_id=msg.message_id).wait()
     elif ASSISTANT.id in [member.id for member in msg.new_chat_members] and get_user(
             msg.from_user).status < User.ADMIN:
         mobibot_logger.info('Added to chat ' + str(msg.chat) + ' by ' + str(msg.from_user))
